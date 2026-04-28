@@ -1,0 +1,8 @@
+{
+  "project_name": "example",
+  "description": "What to build",
+  "features": ["feature1", "feature2"],
+  "stack": "react-trpc-tailwind",
+  "theme": "dark",
+  "market": "canadian"
+}

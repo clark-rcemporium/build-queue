@@ -1,0 +1,147 @@
+name: Dual-Agent Build Pipeline - Code Generation
+
+on:
+  push:
+    paths:
+      - 'requests/*.json'
+    branches:
+      - main
+
+jobs:
+  generate-code:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install -g ts-node typescript @types/node openai
+
+      - name: Process Build Requests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Create a script to process the JSON files and call OpenAI
+          cat << 'EOF' > process_requests.js
+          const fs = require('fs');
+          const path = require('path');
+          const { OpenAI } = require('openai');
+          const { execSync } = require('child_process');
+
+          const openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY,
+          });
+
+          async function processFile(filePath) {
+            console.log(`Processing request: ${filePath}`);
+            const requestData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            
+            // Skip the template file
+            if (path.basename(filePath) === 'TEMPLATE.json') {
+              console.log('Skipping TEMPLATE.json');
+              return;
+            }
+
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const buildDir = path.join('builds', timestamp);
+            
+            try {
+              fs.mkdirSync(buildDir, { recursive: true });
+              
+              const prompt = `
+              BUILD MODE: I need you to write a complete, production-ready web application based on the following specifications:
+              Project Name: ${requestData.project_name}
+              Description: ${requestData.description}
+              Features: ${requestData.features.join(', ')}
+              Stack: ${requestData.stack}
+              Theme: ${requestData.theme}
+              Market: ${requestData.market}
+
+              Output every file with full code — no placeholders, no TODOs, no 'add your logic here'.
+              Structure it as: package.json, tsconfig.json, src/server/ (Express + tRPC), src/client/ (React + Tailwind), src/shared/ (types).
+              Dark theme.
+              My assembler will handle deployment — your job is 100% of the code.
+              
+              Return the response as a JSON object where keys are file paths (e.g., "package.json", "src/server/index.ts") and values are the file contents as strings. Do not include markdown formatting or explanations, just the raw JSON object.
+              `;
+
+              console.log('Calling OpenAI API...');
+              const response = await openai.chat.completions.create({
+                model: "gpt-4o",
+                messages: [
+                  { role: "system", content: "You are the Code Generator in a Dual-Agent Build Pipeline. You write 100% of the code. You output complete, production-ready files. You use NO placeholders, NO TODOs. You return ONLY a valid JSON object mapping file paths to file contents." },
+                  { role: "user", content: prompt }
+                ],
+                response_format: { type: "json_object" }
+              });
+
+              const generatedFiles = JSON.parse(response.choices[0].message.content);
+              
+              for (const [relPath, content] of Object.entries(generatedFiles)) {
+                const fullPath = path.join(buildDir, relPath);
+                fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+                fs.writeFileSync(fullPath, content);
+                console.log(`Created file: ${fullPath}`);
+              }
+
+              fs.writeFileSync(path.join(buildDir, 'STATUS.md'), 'READY_FOR_ASSEMBLY');
+              console.log(`Successfully generated build in ${buildDir}`);
+              
+              // Move the processed request to a 'processed' folder to avoid re-processing
+              const processedDir = path.join('requests', 'processed');
+              fs.mkdirSync(processedDir, { recursive: true });
+              fs.renameSync(filePath, path.join(processedDir, path.basename(filePath)));
+              
+            } catch (error) {
+              console.error(`Error processing ${filePath}:`, error);
+              fs.writeFileSync(path.join(buildDir, 'STATUS.md'), `FAILED\n\nError: ${error.message}`);
+              process.exitCode = 1;
+            }
+          }
+
+          async function main() {
+            // Get list of changed files in the requests directory from git
+            try {
+              // In a real scenario, we'd use git diff to find newly added files, 
+              // but for simplicity we'll just process all JSON files in requests/ 
+              // that aren't in requests/processed/
+              const files = fs.readdirSync('requests')
+                .filter(f => f.endsWith('.json') && f !== 'TEMPLATE.json')
+                .map(f => path.join('requests', f));
+                
+              for (const file of files) {
+                await processFile(file);
+              }
+            } catch (error) {
+              console.error('Error in main process:', error);
+              process.exitCode = 1;
+            }
+          }
+
+          main();
+          EOF
+          
+          node process_requests.js
+
+      - name: Commit and push generated code
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add builds/ requests/
+          # Only commit if there are changes
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto-generate code from build requests"
+            git push
+          else
+            echo "No changes to commit"
+          fi
