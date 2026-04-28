@@ -25,112 +25,215 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install -g ts-node typescript @types/node openai
+        run: |
+          npm install openai
+          echo "Dependencies installed."
 
       - name: Process Build Requests
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Set OPENAI_BASE_URL to override endpoint (e.g. for OpenRouter)
+          # Leave blank to use default OpenAI endpoint
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
         run: |
-          # Create a script to process the JSON files and call OpenAI
-          cat << 'EOF' > process_requests.js
+          cat << 'SCRIPT_EOF' > process_requests.js
           const fs = require('fs');
           const path = require('path');
           const { OpenAI } = require('openai');
-          const { execSync } = require('child_process');
 
-          const openai = new OpenAI({
+          // Support both native OpenAI and OpenRouter (OpenAI-compatible)
+          const clientConfig = {
             apiKey: process.env.OPENAI_API_KEY,
-          });
+          };
+          if (process.env.OPENAI_BASE_URL && process.env.OPENAI_BASE_URL.trim() !== '') {
+            clientConfig.baseURL = process.env.OPENAI_BASE_URL.trim();
+            console.log(`Using custom API base: ${clientConfig.baseURL}`);
+          }
+
+          const openai = new OpenAI(clientConfig);
+
+          // Detect model: OpenRouter uses full model paths
+          const isOpenRouter = (clientConfig.baseURL || '').includes('openrouter');
+          const MODEL = isOpenRouter ? 'openai/gpt-4o' : 'gpt-4o';
 
           async function processFile(filePath) {
+            console.log(`\n========================================`);
             console.log(`Processing request: ${filePath}`);
-            const requestData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-            
-            // Skip the template file
-            if (path.basename(filePath) === 'TEMPLATE.json') {
-              console.log('Skipping TEMPLATE.json');
+            console.log(`========================================`);
+
+            let requestData;
+            try {
+              requestData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            } catch (parseErr) {
+              console.error(`ERROR: Failed to parse JSON from ${filePath}: ${parseErr.message}`);
+              process.exitCode = 1;
               return;
             }
 
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const buildDir = path.join('builds', timestamp);
-            
+            // Skip the template file
+            if (path.basename(filePath) === 'TEMPLATE.json') {
+              console.log('Skipping TEMPLATE.json — this is the format reference only.');
+              return;
+            }
+
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+            const buildDir = path.join('builds', `${requestData.project_name || 'project'}_${timestamp}`);
+
+            console.log(`Build output directory: ${buildDir}`);
+            fs.mkdirSync(buildDir, { recursive: true });
+
+            // Write a PENDING status immediately
+            fs.writeFileSync(path.join(buildDir, 'STATUS.md'), `PENDING\n\nRequest: ${filePath}\nStarted: ${new Date().toISOString()}`);
+
             try {
-              fs.mkdirSync(buildDir, { recursive: true });
-              
-              const prompt = `
-              BUILD MODE: I need you to write a complete, production-ready web application based on the following specifications:
-              Project Name: ${requestData.project_name}
-              Description: ${requestData.description}
-              Features: ${requestData.features.join(', ')}
-              Stack: ${requestData.stack}
-              Theme: ${requestData.theme}
-              Market: ${requestData.market}
+              const prompt = `BUILD MODE: Generate a complete, production-ready web application with the following specifications:
 
-              Output every file with full code — no placeholders, no TODOs, no 'add your logic here'.
-              Structure it as: package.json, tsconfig.json, src/server/ (Express + tRPC), src/client/ (React + Tailwind), src/shared/ (types).
-              Dark theme.
-              My assembler will handle deployment — your job is 100% of the code.
-              
-              Return the response as a JSON object where keys are file paths (e.g., "package.json", "src/server/index.ts") and values are the file contents as strings. Do not include markdown formatting or explanations, just the raw JSON object.
-              `;
+Project Name: ${requestData.project_name}
+Description: ${requestData.description}
+Features: ${(requestData.features || []).join(', ')}
+Stack: ${requestData.stack || 'react-trpc-tailwind'}
+Theme: ${requestData.theme || 'dark'}
+Market: ${requestData.market || 'canadian'}
 
-              console.log('Calling OpenAI API...');
+REQUIREMENTS:
+- Output every file with full, runnable code — NO placeholders, NO TODOs, NO "add your logic here"
+- Project structure MUST include:
+  package.json (with all dependencies and build/dev/start scripts)
+  tsconfig.json
+  src/server/index.ts (Express + tRPC server)
+  src/server/routes.ts (all tRPC routes)
+  src/client/index.html
+  src/client/main.tsx
+  src/client/App.tsx
+  src/client/components/ (all UI components)
+  src/shared/types.ts (shared TypeScript types)
+- Dark theme: bg-gray-900, text-white, accent colors as appropriate
+- All imports must be correct and consistent across files
+- All dependencies must be listed in package.json
+- Canadian market focus (RC Emporium Technologies Inc.)
+- No mock data unless seed data is explicitly requested
+
+RESPONSE FORMAT:
+Return ONLY a valid JSON object where:
+- Keys are relative file paths (e.g. "package.json", "src/server/index.ts")
+- Values are the complete file contents as strings
+Do NOT include markdown code fences, explanations, or any text outside the JSON object.`;
+
+              console.log(`Calling AI API with model: ${MODEL}...`);
+              console.log(`Request: ${requestData.project_name} — ${requestData.description}`);
+
               const response = await openai.chat.completions.create({
-                model: "gpt-4o",
+                model: MODEL,
                 messages: [
-                  { role: "system", content: "You are the Code Generator in a Dual-Agent Build Pipeline. You write 100% of the code. You output complete, production-ready files. You use NO placeholders, NO TODOs. You return ONLY a valid JSON object mapping file paths to file contents." },
-                  { role: "user", content: prompt }
+                  {
+                    role: 'system',
+                    content: 'You are the Code Generator in a Dual-Agent Build Pipeline. You write 100% of the code. You output complete, production-ready files. You use NO placeholders, NO TODOs. You return ONLY a valid JSON object mapping file paths to file contents as strings. No markdown, no explanations, no code fences — pure JSON only.'
+                  },
+                  { role: 'user', content: prompt }
                 ],
-                response_format: { type: "json_object" }
+                response_format: { type: 'json_object' },
+                temperature: 0.2,
               });
 
-              const generatedFiles = JSON.parse(response.choices[0].message.content);
-              
+              const rawContent = response.choices[0].message.content;
+              console.log(`Received response. Parsing generated files...`);
+
+              let generatedFiles;
+              try {
+                generatedFiles = JSON.parse(rawContent);
+              } catch (jsonErr) {
+                throw new Error(`AI returned invalid JSON: ${jsonErr.message}\nRaw content preview: ${rawContent.slice(0, 500)}`);
+              }
+
+              const fileList = Object.keys(generatedFiles);
+              console.log(`Generated ${fileList.length} files:`);
+              fileList.forEach(f => console.log(`  - ${f}`));
+
               for (const [relPath, content] of Object.entries(generatedFiles)) {
                 const fullPath = path.join(buildDir, relPath);
                 fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-                fs.writeFileSync(fullPath, content);
-                console.log(`Created file: ${fullPath}`);
+                fs.writeFileSync(fullPath, typeof content === 'string' ? content : JSON.stringify(content, null, 2));
               }
 
-              fs.writeFileSync(path.join(buildDir, 'STATUS.md'), 'READY_FOR_ASSEMBLY');
-              console.log(`Successfully generated build in ${buildDir}`);
-              
-              // Move the processed request to a 'processed' folder to avoid re-processing
+              // Write final STATUS.md
+              const statusContent = [
+                'READY_FOR_ASSEMBLY',
+                '',
+                `Project: ${requestData.project_name}`,
+                `Description: ${requestData.description}`,
+                `Stack: ${requestData.stack || 'react-trpc-tailwind'}`,
+                `Theme: ${requestData.theme || 'dark'}`,
+                `Market: ${requestData.market || 'canadian'}`,
+                `Generated: ${new Date().toISOString()}`,
+                `Files: ${fileList.length}`,
+                '',
+                '## File List',
+                ...fileList.map(f => `- ${f}`),
+              ].join('\n');
+
+              fs.writeFileSync(path.join(buildDir, 'STATUS.md'), statusContent);
+              console.log(`\nSUCCESS: Build ready at ${buildDir}`);
+
+              // Move processed request to avoid re-triggering
               const processedDir = path.join('requests', 'processed');
               fs.mkdirSync(processedDir, { recursive: true });
-              fs.renameSync(filePath, path.join(processedDir, path.basename(filePath)));
-              
+              const destPath = path.join(processedDir, path.basename(filePath));
+              fs.renameSync(filePath, destPath);
+              console.log(`Request archived to: ${destPath}`);
+
             } catch (error) {
-              console.error(`Error processing ${filePath}:`, error);
-              fs.writeFileSync(path.join(buildDir, 'STATUS.md'), `FAILED\n\nError: ${error.message}`);
+              console.error(`\nFAILED: ${error.message}`);
+
+              const failureContent = [
+                'FAILED',
+                '',
+                `Project: ${requestData.project_name}`,
+                `Failed: ${new Date().toISOString()}`,
+                '',
+                '## Error',
+                '```',
+                error.message,
+                '```',
+                '',
+                '## Next Steps',
+                '1. Copy the error above',
+                '2. Paste it into ChatGPT with your original request',
+                '3. ChatGPT will fix and return updated code',
+                '4. Push a new request JSON to requests/ to retry',
+              ].join('\n');
+
+              fs.writeFileSync(path.join(buildDir, 'STATUS.md'), failureContent);
               process.exitCode = 1;
             }
           }
 
           async function main() {
-            // Get list of changed files in the requests directory from git
+            console.log('Dual-Agent Build Pipeline — Code Generation Phase');
+            console.log(`Timestamp: ${new Date().toISOString()}`);
+
             try {
-              // In a real scenario, we'd use git diff to find newly added files, 
-              // but for simplicity we'll just process all JSON files in requests/ 
-              // that aren't in requests/processed/
-              const files = fs.readdirSync('requests')
+              const requestFiles = fs.readdirSync('requests')
                 .filter(f => f.endsWith('.json') && f !== 'TEMPLATE.json')
                 .map(f => path.join('requests', f));
-                
-              for (const file of files) {
+
+              if (requestFiles.length === 0) {
+                console.log('No new request files found in requests/ (excluding TEMPLATE.json).');
+                return;
+              }
+
+              console.log(`Found ${requestFiles.length} request(s) to process.`);
+              for (const file of requestFiles) {
                 await processFile(file);
               }
-            } catch (error) {
-              console.error('Error in main process:', error);
+            } catch (err) {
+              console.error(`Fatal error in pipeline: ${err.message}`);
               process.exitCode = 1;
             }
           }
 
           main();
-          EOF
-          
+          SCRIPT_EOF
+
           node process_requests.js
 
       - name: Commit and push generated code
@@ -138,10 +241,10 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add builds/ requests/
-          # Only commit if there are changes
           if ! git diff --staged --quiet; then
-            git commit -m "Auto-generate code from build requests"
+            git commit -m "chore: auto-generate build from request [skip ci]"
             git push
+            echo "Generated code committed and pushed successfully."
           else
-            echo "No changes to commit"
+            echo "No changes to commit — no new builds were generated."
           fi
