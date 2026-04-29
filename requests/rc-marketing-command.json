@@ -1,0 +1,18 @@
+{
+  "project_name": "rc-marketing-command",
+  "description": "Internal marketing command center for all RC Emporium ventures (Invoice AI, RCBID, VEPKAR, AVOS). Generates social media posts, builds email campaigns, creates landing pages, tracks SEO keywords, manages a content calendar with scheduling, and builds lead capture forms. Dark theme, Canadian market focus, internal use only for the founder.",
+  "features": [
+    "Social media post generator (LinkedIn, Twitter, Facebook) with AI-powered copy",
+    "Email campaign builder with templates and sequence automation",
+    "Landing page generator with drag-and-drop or template selection",
+    "SEO keyword tracker with ranking and suggestions",
+    "Content calendar with scheduling and venture-specific filtering",
+    "Lead capture form builder with embed codes",
+    "Multi-venture support: Invoice AI, RCBID, VEPKAR, AVOS",
+    "Dashboard showing campaign performance metrics",
+    "Export/copy for all generated content"
+  ],
+  "stack": "react-trpc-tailwind",
+  "theme": "dark",
+  "market": "canadian"
+}
